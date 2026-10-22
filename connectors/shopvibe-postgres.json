@@ -1,0 +1,28 @@
+{
+  "name": "shopvibe-postgres",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "plugin.name": "pgoutput",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "postgres",
+    "database.password": "postgres",
+    "database.dbname": "postgres",
+    "topic.prefix": "shopvibe",
+    "schema.include.list": "shopvibe",
+    "table.include.list": "shopvibe.orders,shopvibe.order_items",
+    "slot.name": "shopvibe_slot",
+    "publication.name": "shopvibe_pub",
+    "publication.autocreate.mode": "disabled",
+    "snapshot.mode": "initial",
+    "decimal.handling.mode": "string",
+    "time.precision.mode": "connect",
+    "tombstones.on.delete": "false",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "false",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false",
+    "topic.creation.default.replication.factor": "1",
+    "topic.creation.default.partitions": "3"
+  }
+}

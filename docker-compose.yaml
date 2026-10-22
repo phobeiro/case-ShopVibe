@@ -1,0 +1,168 @@
+services:
+  postgres:
+    image: quay.io/debezium/example-postgres:${POSTGRES_DEBEZIUM}
+    container_name: postgres
+    ports:
+      - 5432:5432
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      lab_network:
+ 
+  pgadmin:
+    container_name: pgadmin_container
+    image: dpage/pgadmin4:${PAGADMIN_VERSION}
+    environment:
+      PGADMIN_DEFAULT_EMAIL: lab-pgadmin4@pgadmin.org
+      PGADMIN_DEFAULT_PASSWORD: postgres
+    ports:
+      - "5433:80"
+    depends_on:
+      - postgres
+    networks:
+      lab_network:
+ 
+  # Kafka em modo KRaft (sem ZooKeeper), broker + controller no mesmo nó
+  kafka:
+    image: apache/kafka:${KAFKA_VERSION}
+    container_name: kafka
+    ports:
+      - "29092:29092"   # acesso a partir do host (localhost:29092)
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:9092,EXTERNAL://:29092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    networks:
+      lab_network:
+ 
+  # Kafka Connect com os conectores Debezium
+  connect:
+    image: quay.io/debezium/connect:${DEBEZIUM_VERSION}
+    container_name: connect
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: shopvibe-connect
+      CONFIG_STORAGE_TOPIC: connect_configs
+      OFFSET_STORAGE_TOPIC: connect_offsets
+      STATUS_STORAGE_TOPIC: connect_statuses
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      lab_network:
+ 
+  # Interface web para ver tópicos e mensagens (útil no vídeo)
+  kafka-ui:
+    image: provectuslabs/kafka-ui:${KAFKA_UI_VERSION}
+    container_name: kafka-ui
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: shopvibe
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: debezium
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://connect:8083
+    depends_on:
+      kafka:
+        condition: service_healthy
+      connect:
+        condition: service_started
+    networks:
+      lab_network:
+ 
+  # Object storage S3-compatível (SeaweedFS): será a camada bronze
+  # Obs.: S3 sem autenticação, apenas para laboratório local
+  seaweedfs:
+    image: chrislusf/seaweedfs:${SEAWEEDFS_VERSION}
+    container_name: seaweedfs
+    command: server -dir=/data -s3
+    ports:
+      - "9333:9333"   # master (UI)
+      - "8888:8888"   # filer (UI para navegar nos arquivos)
+      - "8333:8333"   # API S3
+    volumes:
+      - seaweedfs_data:/data
+    networks:
+      lab_network:
+ 
+  # Cria o bucket bronze (com novas tentativas até o cluster ficar pronto) e encerra
+  seaweedfs-init:
+    image: chrislusf/seaweedfs:${SEAWEEDFS_VERSION}
+    container_name: seaweedfs-init
+    depends_on:
+      - seaweedfs
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        for i in $$(seq 1 40); do
+          if echo "s3.bucket.create -name bronze" | weed shell -master=seaweedfs:9333; then
+            echo "bucket bronze pronto"; exit 0
+          fi
+          echo "aguardando o SeaweedFS... tentativa $$i"; sleep 3
+        done
+        echo "falha ao criar o bucket bronze"; exit 1
+    networks:
+      lab_network:
+ 
+  # Writer da camada bronze: Kafka -> SeaweedFS (JSON Lines, particionado por tabela/data)
+  bronze-writer:
+    build: ./bronze_writer
+    container_name: bronze-writer
+    restart: unless-stopped
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      TOPIC_PATTERN: '^shopvibe\.shopvibe\.(orders|order_items)$$'
+      GROUP_ID: bronze-writer
+      S3_ENDPOINT: http://seaweedfs:8333
+      S3_BUCKET: bronze
+      FLUSH_SECONDS: 2
+      FLUSH_MAX_RECORDS: 500
+    depends_on:
+      kafka:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_started
+    networks:
+      lab_network:
+ 
+volumes:
+  postgres_data:
+  kafka_data:
+  seaweedfs_data:
+ 
+networks:
+  lab_network:
+    driver: bridge
